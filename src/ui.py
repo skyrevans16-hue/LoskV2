@@ -446,7 +446,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
     def _on_realize(self, *_args):
         GLib.timeout_add(300, self._setup_window)
-        GLib.timeout_add(1500, self._track_other_window)
+        GLib.timeout_add(600, self._track_other_window)
 
     def _own_xid(self):
         try:
@@ -472,7 +472,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         """Written to a log file so LOSK can be launched from the apps menu and
         still report what happened."""
         line = (
-            "[LOSK 2.6.0] session=%s xid=%s xlib=%s (%s) never_focus=%s "
+            "[LOSK 2.7.0] session=%s xid=%s xlib=%s (%s) never_focus=%s "
             "uinput=%s (%s) wmctrl=%s voice=%s"
             % (
                 self._session,
@@ -510,8 +510,9 @@ class LoskWindow(Gtk.ApplicationWindow):
         return False
 
     def _track_other_window(self):
-        if self._never_focus:
-            return True
+        """Runs even when never_focus is on. Some window managers drop focus
+        entirely when you click a no-input window, and then there is nothing
+        holding the keystroke target. Tracking costs almost nothing via xlib."""
         if self.is_active():
             return True
         if self.xt and self.xt.available:
@@ -534,7 +535,9 @@ class LoskWindow(Gtk.ApplicationWindow):
         return True
 
     def _return_focus(self):
-        if self._never_focus or not self._last_window:
+        """Cheap on the xlib path, roughly 0.1 ms, so it is safe to call on
+        every keypress. Only the xdotool fallback is expensive."""
+        if not self._last_window:
             return
         if str(self._last_window) == str(self._own_id):
             return
@@ -687,9 +690,18 @@ class LoskWindow(Gtk.ApplicationWindow):
             return
 
         self._return_focus()
-        self.kb.tap(name, self._active_mods())
+        sent = self.kb.tap(name, self._active_mods())
+        self._show_sent(name, sent)
         self._update_word(name)
         self._clear_latched()
+
+    def _show_sent(self, name, sent):
+        """If this updates when you click but nothing appears in your app, the
+        problem is focus. If it does not update at all, the click never
+        registered."""
+        short = name.replace("KEY_", "").lower()
+        target = self._last_window or "none"
+        self._set_status("sent %s %s \u2192 %s" % (short, "ok" if sent else "FAIL", target))
 
     def _cycle_modifier(self, name):
         """Click once to latch for the next key, again to lock, again to clear.

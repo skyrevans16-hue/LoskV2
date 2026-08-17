@@ -1,3 +1,11 @@
+losk (2.7.0) unstable; urgency=medium
+
+  * Fixed keys going nowhere when never-focus was active: LOSK had stopped tracking the target window.
+  * Focus is restored through xlib on every keypress, about 0.1 ms instead of 20-30 ms.
+  * Status area shows the last key sent and its target window.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Mon, 17 Aug 2026 04:00:00 +0000
+
 losk (2.6.0) unstable; urgency=medium
 
   * Fixed keys not typing at all: the 2.5.0 click catcher was swallowing clicks.
