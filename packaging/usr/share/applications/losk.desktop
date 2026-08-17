@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=LOSK
+GenericName=On-Screen Keyboard
+Comment=Compact Windows-style Linux on-screen keyboard
+Exec=losk
+Icon=losk
+Terminal=false
+Type=Application
+Categories=Utility;Accessibility;
+Keywords=keyboard;onscreen;osk;accessibility;touch;
+StartupNotify=true
+StartupWMClass=com.zeshmc.losk

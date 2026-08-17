@@ -1,0 +1,3 @@
+#!/bin/sh
+# LOSK launcher. Made by ZeshMC
+exec python3 /usr/lib/losk/main.py "$@"

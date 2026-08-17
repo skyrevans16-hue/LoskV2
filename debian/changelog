@@ -1,0 +1,11 @@
+losk (2.0.0) unstable; urgency=medium
+
+  * LoskV2 rewrite by ZeshMC.
+  * Compact desktop-style layout with correct key widths.
+  * Real numeric keypad with tall plus and Enter, duplicate plus removed.
+  * Latching modifiers and shifted key labels.
+  * Offline word suggestions that learn frequently used words.
+  * Graceful fallback when uinput is unavailable.
+  * Always-on-top and focus return handling.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Sun, 16 Aug 2026 12:00:00 +0000

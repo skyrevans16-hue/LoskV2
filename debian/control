@@ -1,0 +1,26 @@
+Source: losk
+Section: utils
+Priority: optional
+Maintainer: ZeshMC <zeshmc@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+
+Package: losk
+Architecture: all
+Depends: ${misc:Depends},
+         python3,
+         python3-gi,
+         gir1.2-gtk-4.0,
+         python3-evdev,
+         wmctrl,
+         xdotool
+Description: LOSK - Linux On-Screen Keyboard
+ A compact on-screen keyboard for Linux, laid out like a normal desktop
+ keyboard rather than a tablet keyboard. Includes function keys, a full
+ navigation cluster, arrows and a real numeric keypad.
+ .
+ Typing is done through the kernel uinput device, so it works with any
+ application. Word suggestions are fully offline and learn the words you
+ use most.
+ .
+ Made by ZeshMC.
