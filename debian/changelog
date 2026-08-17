@@ -1,3 +1,13 @@
+losk (2.2.0) unstable; urgency=medium
+
+  * Fixed keys typing into LOSK instead of your app: focus is now returned before injection.
+  * No widget in LOSK can take keyboard focus, so a stray key cannot press a button.
+  * Added a Hide button and removed skip_taskbar so minimize works.
+  * Next-word prediction and a much larger word list.
+  * Optional offline voice input via Vosk.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Sun, 16 Aug 2026 22:00:00 +0000
+
 losk (2.1.0) unstable; urgency=medium
 
   * Keys scale with the window using a homogeneous grid.

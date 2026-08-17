@@ -5,6 +5,10 @@ Made by ZeshMC
 The whole keyboard is one homogeneous Gtk.Grid. That is what makes the keys
 grow and shrink when you resize the window, instead of staying a fixed size.
 One key unit = 4 grid columns, so a 2.25 unit Shift is 9 columns.
+
+Focus rule: clicking LOSK gives LOSK the keyboard focus, so focus must be
+handed back to your real app BEFORE a key is injected. Injecting first sends
+the keystroke into LOSK itself.
 """
 
 import glob
@@ -30,17 +34,22 @@ from layouts import (
 from keyboard import VirtualKeyboard
 from suggestions import SuggestionEngine
 
+try:
+    from voice import VoiceInput
+except Exception:
+    VoiceInput = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CPU = 4                              # grid columns per key unit
-MAIN_COLS = 15 * CPU                 # main block is 15 units wide
+MAIN_COLS = 15 * CPU
 NAV_COLS = 3 * CPU
 PAD_COLS = 4 * CPU
-CLUSTER_GAP = 3                      # blank columns between clusters
+CLUSTER_GAP = 3
 NAV_START = MAIN_COLS + CLUSTER_GAP
 PAD_START = NAV_START + NAV_COLS + CLUSTER_GAP
 
-BASE_WIDTH = 1000                    # reference width for font scaling
+BASE_WIDTH = 1000
 BASE_FONT = 13
 
 STATIC_CSS = b"""
@@ -88,6 +97,7 @@ window { background-color: #1b202b; }
 }
 .tool:hover { background-color: #384254; }
 .tool-on { background-color: #4d81d8; border-color: #6d9bea; }
+.tool-rec { background-color: #c0392b; border-color: #e05c4b; }
 """
 
 
@@ -107,6 +117,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         self.kb = VirtualKeyboard()
         self.words = SuggestionEngine()
+        self.voice = VoiceInput() if VoiceInput else None
 
         self._keys = []
         self._labels = []
@@ -130,6 +141,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         self.set_default_size(1000, 420)
         self.connect("notify::default-width", self._on_size_changed)
+        self.connect("notify::is-active", self._on_active_changed)
         self.connect("realize", self._on_realize)
         self.connect("close-request", self._on_close)
         self._apply_font(1000)
@@ -154,7 +166,6 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._apply_font(self.get_width() or self.get_default_size()[0])
 
     def _apply_font(self, width):
-        """Grow the label text along with the window so keys stay readable."""
         if not width:
             return
         scale = max(0.65, min(2.4, float(width) / BASE_WIDTH))
@@ -189,6 +200,24 @@ class LoskWindow(Gtk.ApplicationWindow):
         grid.set_vexpand(True)
         root.append(grid)
 
+    def _no_focus(self, widget):
+        """Nothing in LOSK may take keyboard focus. If it can, an injected key
+        activates it instead of reaching your app."""
+        widget.set_focus_on_click(False)
+        widget.set_can_focus(False)
+        try:
+            widget.set_focusable(False)
+        except Exception:
+            pass
+        return widget
+
+    def _tool_button(self, label, handler, *args):
+        button = Gtk.Button(label=label)
+        button.add_css_class("tool")
+        self._no_focus(button)
+        button.connect("clicked", handler, *args)
+        return button
+
     def _build_toolbar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
 
@@ -217,28 +246,27 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.status.add_css_class("status")
         bar.append(self.status)
 
-        self.pin_button = Gtk.Button(label="Pinned")
-        self.pin_button.add_css_class("tool")
+        self.mic_button = self._tool_button("Mic", self._toggle_voice)
+        bar.append(self.mic_button)
+
+        self.pin_button = self._tool_button("Pinned", self._toggle_pin)
         self.pin_button.add_css_class("tool-on")
-        self.pin_button.set_focus_on_click(False)
-        self.pin_button.connect("clicked", self._toggle_pin)
         bar.append(self.pin_button)
 
         for label, width, height in (("S", 780, 340), ("M", 1000, 420), ("L", 1320, 560)):
-            button = Gtk.Button(label=label)
-            button.add_css_class("tool")
-            button.set_focus_on_click(False)
-            button.connect("clicked", self._set_size, width, height)
-            bar.append(button)
+            bar.append(self._tool_button(label, self._set_size, width, height))
+
+        bar.append(self._tool_button("Hide", self._on_hide))
 
         return bar
 
     def _status_text(self):
-        parts = []
-        parts.append("typing: on" if self.kb.available else "typing: off (%s)" % self.kb.reason)
-        if self._session == "wayland":
-            parts.append("wayland")
-        return "  \u00b7  ".join(parts)
+        if self.kb.available:
+            return "typing: on"
+        return "typing: off (%s)" % self.kb.reason
+
+    def _set_status(self, text):
+        self.status.set_label(text)
 
     def _build_suggestion_bar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -247,8 +275,7 @@ class LoskWindow(Gtk.ApplicationWindow):
             button = Gtk.Button(label="")
             button.add_css_class("suggest")
             button.set_hexpand(True)
-            button.set_focus_on_click(False)
-            button.set_can_focus(False)
+            self._no_focus(button)
             button.connect("clicked", self._on_suggestion, index)
             bar.append(button)
             self.suggest_buttons.append(button)
@@ -260,7 +287,6 @@ class LoskWindow(Gtk.ApplicationWindow):
         grid.set_column_homogeneous(True)
         grid.set_row_homogeneous(True)
 
-        # Row 0: function row
         col = 0
         for label, name, width, shift_label in FUNCTION_ROW:
             span = int(round(width * CPU))
@@ -268,7 +294,6 @@ class LoskWindow(Gtk.ApplicationWindow):
                 grid.attach(self._make_key(label, name, shift_label), col, 0, span, 1)
             col += span
 
-        # Rows 1 to 5: main block
         for row_index, row in enumerate(ROWS):
             col = 0
             for label, name, width, shift_label in row:
@@ -280,7 +305,6 @@ class LoskWindow(Gtk.ApplicationWindow):
                     grid.attach(key, col, row_index + 1, span, 1)
                 col += span
 
-        # Navigation cluster, rows line up with the main block
         for label, name, col_unit, row in NAV_GRID:
             key = self._make_key(label, name, None)
             if row == 1:
@@ -291,7 +315,6 @@ class LoskWindow(Gtk.ApplicationWindow):
             grid.attach(self._make_key(label, name, None),
                         NAV_START + col_unit * CPU, row, CPU, 1)
 
-        # Numpad, shifted down one row so it starts under the function row
         for label, name, col_unit, row, colspan, rowspan in NUMPAD_GRID:
             key = self._make_key(label, name, None)
             if row == 0:
@@ -303,7 +326,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
     def _make_key(self, label, name, shift_label=None):
         button = Gtk.Button()
-        # A separate ellipsizing label keeps long text from forcing the key wider,
+        # An ellipsizing label keeps long text from forcing the key wider,
         # which is what would otherwise stop the window from shrinking.
         text = Gtk.Label(label=label)
         text.set_ellipsize(Pango.EllipsizeMode.END)
@@ -311,8 +334,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         button.set_child(text)
 
         button.add_css_class("key")
-        button.set_focus_on_click(False)
-        button.set_can_focus(False)
+        self._no_focus(button)
         button.set_hexpand(True)
         button.set_vexpand(True)
         button.set_size_request(18, 20)
@@ -333,6 +355,9 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.set_default_size(width, height)
         self._apply_font(width)
 
+    def _on_hide(self, _button):
+        self.minimize()
+
     # ---------- window behaviour ----------
 
     def _on_realize(self, *_args):
@@ -351,6 +376,9 @@ class LoskWindow(Gtk.ApplicationWindow):
             ids = result.stdout.split()
             if ids:
                 self._own_id = ids[-1]
+                # Never let LOSK become its own focus target.
+                if self._last_window in ids:
+                    self._last_window = None
                 self._keep_above()
                 return False
         except Exception:
@@ -358,11 +386,13 @@ class LoskWindow(Gtk.ApplicationWindow):
         return True
 
     def _keep_above(self):
-        """Re-assert always-on-top. Some window managers drop the hint, so we repeat."""
+        """Re-assert always-on-top. Some window managers drop the hint."""
         if not self._pinned or not self._wmctrl:
             return True
         target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
-        for flag in ("add,above", "add,sticky", "add,skip_taskbar", "add,skip_pager"):
+        # skip_taskbar is deliberately not set. It made a minimized LOSK
+        # impossible to get back.
+        for flag in ("add,above", "add,sticky"):
             try:
                 subprocess.run(["wmctrl"] + target + ["-b", flag],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -372,7 +402,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         return True
 
     def _track_other_window(self):
-        """Remember the app you were typing into so keystrokes can go back to it."""
+        """Remember the app you were typing into."""
         if not self._xdotool:
             return False
         try:
@@ -381,21 +411,33 @@ class LoskWindow(Gtk.ApplicationWindow):
                 capture_output=True, text=True, timeout=1, check=False,
             )
             window_id = result.stdout.strip()
-            if window_id and window_id != self._own_id:
+            if window_id and self._own_id and window_id != self._own_id:
                 self._last_window = window_id
         except Exception:
             pass
         return True
 
     def _return_focus(self):
+        """Hand focus back to your app. Must run BEFORE injecting a key."""
         if not self._xdotool or not self._last_window:
             return
+        if self._last_window == self._own_id:
+            return
         try:
-            subprocess.run(["xdotool", "windowactivate", self._last_window],
+            subprocess.run(["xdotool", "windowactivate", "--sync", self._last_window],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=1, check=False)
         except Exception:
             pass
+
+    def _on_active_changed(self, *_args):
+        # If LOSK grabs focus, give it straight back.
+        if self.is_active() and self._last_window:
+            GLib.timeout_add(10, self._bounce_focus)
+
+    def _bounce_focus(self):
+        self._return_focus()
+        return False
 
     def _toggle_pin(self, button):
         self._pinned = not self._pinned
@@ -416,7 +458,44 @@ class LoskWindow(Gtk.ApplicationWindow):
                     pass
 
     def _on_close(self, *_args):
+        if self.voice:
+            self.voice.stop()
         self.kb.close()
+        return False
+
+    # ---------- voice ----------
+
+    def _toggle_voice(self, button):
+        if self.voice is None or not self.voice.available:
+            reason = self.voice.reason if self.voice else "voice module missing"
+            self._set_status("voice: %s" % reason)
+            return
+        if self.voice.listening:
+            self.voice.stop()
+            button.set_label("Mic")
+            button.remove_css_class("tool-rec")
+            self._set_status(self._status_text())
+        else:
+            self.voice.start(self._on_transcript)
+            button.set_label("Stop")
+            button.add_css_class("tool-rec")
+            self._set_status("voice: listening")
+
+    def _on_transcript(self, text):
+        # Called from the audio thread, so hop back to the GTK thread.
+        GLib.idle_add(self._type_transcript, text)
+
+    def _type_transcript(self, text):
+        if not text:
+            return False
+        self._return_focus()
+        for char in text:
+            self._type_char(char)
+        self._type_char(" ")
+        for word in text.split():
+            self.words.learn(word)
+        self._word = ""
+        self._refresh_suggestions()
         return False
 
     # ---------- typing ----------
@@ -434,15 +513,17 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         if name == "KEY_CAPSLOCK":
             self._caps = not self._caps
+            self._return_focus()
             self.kb.tap(name)
             self._style_modifiers()
             self._refresh_labels()
             return
 
+        # Focus first, then inject. The other order sends the key into LOSK.
+        self._return_focus()
         self.kb.tap(name, self._active_mods())
         self._update_word(name)
         self._clear_latched()
-        self._return_focus()
 
     def _cycle_modifier(self, name):
         """Click once to latch for the next key, again to lock, again to clear."""
@@ -517,13 +598,13 @@ class LoskWindow(Gtk.ApplicationWindow):
             remainder = word[len(self._word):]
         else:
             remainder = word
+        self._return_focus()
         for char in remainder:
             self._type_char(char)
         self._type_char(" ")
         self.words.learn(word)
         self._word = ""
         self._refresh_suggestions()
-        self._return_focus()
 
     def _type_char(self, char):
         entry = CHAR_TO_KEY.get(char)
