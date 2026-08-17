@@ -9,6 +9,9 @@ One key unit = 4 grid columns, so a 2.25 unit Shift is 9 columns.
 Focus rule: clicking LOSK gives LOSK the keyboard focus, so focus must be
 handed back to your real app BEFORE a key is injected. Injecting first sends
 the keystroke into LOSK itself.
+
+Speed rule: xdotool costs milliseconds per call, so only call it when LOSK
+actually holds focus. Once focus has bounced back, later keys skip it.
 """
 
 import glob
@@ -48,6 +51,12 @@ PAD_COLS = 4 * CPU
 CLUSTER_GAP = 3
 NAV_START = MAIN_COLS + CLUSTER_GAP
 PAD_START = NAV_START + NAV_COLS + CLUSTER_GAP
+
+# Windows OSK proportions: wide and short, not a tall tablet keyboard.
+# These are chosen values, not measured from a real Windows screenshot.
+DEFAULT_W, DEFAULT_H = 1000, 330
+MIN_W, MIN_H = 780, 260
+SIZE_PRESETS = (("S", 800, 270), ("M", 1000, 330), ("L", 1320, 440))
 
 BASE_WIDTH = 1000
 BASE_FONT = 13
@@ -139,12 +148,13 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._load_css()
         self._build()
 
-        self.set_default_size(1000, 420)
+        self.set_default_size(DEFAULT_W, DEFAULT_H)
+        self.set_size_request(MIN_W, MIN_H)
         self.connect("notify::default-width", self._on_size_changed)
         self.connect("notify::is-active", self._on_active_changed)
         self.connect("realize", self._on_realize)
         self.connect("close-request", self._on_close)
-        self._apply_font(1000)
+        self._apply_font(DEFAULT_W)
 
     # ---------- styling ----------
 
@@ -163,7 +173,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         )
 
     def _on_size_changed(self, *_args):
-        self._apply_font(self.get_width() or self.get_default_size()[0])
+        self._apply_font(self.get_width() or DEFAULT_W)
 
     def _apply_font(self, width):
         if not width:
@@ -185,11 +195,11 @@ class LoskWindow(Gtk.ApplicationWindow):
     # ---------- building ----------
 
     def _build(self):
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        root.set_margin_top(8)
-        root.set_margin_bottom(8)
-        root.set_margin_start(8)
-        root.set_margin_end(8)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        root.set_margin_top(6)
+        root.set_margin_bottom(6)
+        root.set_margin_start(6)
+        root.set_margin_end(6)
         self.set_child(root)
 
         root.append(self._build_toolbar())
@@ -224,7 +234,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         logo = find_logo()
         if logo:
             image = Gtk.Image.new_from_file(logo)
-            image.set_pixel_size(28)
+            image.set_pixel_size(24)
             bar.append(image)
 
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -253,7 +263,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.pin_button.add_css_class("tool-on")
         bar.append(self.pin_button)
 
-        for label, width, height in (("S", 780, 340), ("M", 1000, 420), ("L", 1320, 560)):
+        for label, width, height in SIZE_PRESETS:
             bar.append(self._tool_button(label, self._set_size, width, height))
 
         bar.append(self._tool_button("Hide", self._on_hide))
@@ -301,14 +311,14 @@ class LoskWindow(Gtk.ApplicationWindow):
                 if name:
                     key = self._make_key(label, name, shift_label)
                     if row_index == 0:
-                        key.set_margin_top(6)
+                        key.set_margin_top(5)
                     grid.attach(key, col, row_index + 1, span, 1)
                 col += span
 
         for label, name, col_unit, row in NAV_GRID:
             key = self._make_key(label, name, None)
             if row == 1:
-                key.set_margin_top(6)
+                key.set_margin_top(5)
             grid.attach(key, NAV_START + col_unit * CPU, row, CPU, 1)
 
         for label, name, col_unit, row in ARROW_GRID:
@@ -318,7 +328,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         for label, name, col_unit, row, colspan, rowspan in NUMPAD_GRID:
             key = self._make_key(label, name, None)
             if row == 0:
-                key.set_margin_top(6)
+                key.set_margin_top(5)
             grid.attach(key, PAD_START + col_unit * CPU, row + 1,
                         colspan * CPU, rowspan)
 
@@ -337,7 +347,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._no_focus(button)
         button.set_hexpand(True)
         button.set_vexpand(True)
-        button.set_size_request(18, 20)
+        button.set_size_request(16, 18)
         self._keys.append(button)
 
         is_letter = name in LETTER_KEYS
@@ -362,8 +372,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
     def _on_realize(self, *_args):
         GLib.timeout_add(500, self._find_own_id)
-        GLib.timeout_add(700, self._track_other_window)
-        GLib.timeout_add(2000, self._keep_above)
+        GLib.timeout_add(1000, self._track_other_window)
 
     def _find_own_id(self):
         if not self._xdotool:
@@ -386,9 +395,14 @@ class LoskWindow(Gtk.ApplicationWindow):
         return True
 
     def _keep_above(self):
-        """Re-assert always-on-top. Some window managers drop the hint."""
+        """Ask the window manager to keep LOSK above other windows.
+
+        Called on startup, when LOSK is activated, and when you toggle the pin.
+        It used to run on a 2 second timer, but every call restacks the window
+        and that made the taskbar indicators flash.
+        """
         if not self._pinned or not self._wmctrl:
-            return True
+            return False
         target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
         # skip_taskbar is deliberately not set. It made a minimized LOSK
         # impossible to get back.
@@ -399,44 +413,55 @@ class LoskWindow(Gtk.ApplicationWindow):
                                timeout=2, check=False)
             except Exception:
                 pass
-        return True
+        return False
 
     def _track_other_window(self):
-        """Remember the app you were typing into."""
+        """Remember the app you were typing into. Skipped while LOSK is active,
+        since the answer would just be LOSK."""
         if not self._xdotool:
             return False
+        if self.is_active():
+            return True
         try:
             result = subprocess.run(
                 ["xdotool", "getactivewindow"],
                 capture_output=True, text=True, timeout=1, check=False,
             )
             window_id = result.stdout.strip()
-            if window_id and self._own_id and window_id != self._own_id:
+            if window_id and window_id != self._own_id:
                 self._last_window = window_id
         except Exception:
             pass
         return True
 
-    def _return_focus(self):
-        """Hand focus back to your app. Must run BEFORE injecting a key."""
+    def _return_focus(self, force=False):
+        """Hand focus back to your app. Must run BEFORE injecting a key.
+
+        No --sync here: waiting for the window switch made every keypress
+        visibly slow. And if LOSK does not currently hold focus there is
+        nothing to hand back, so the whole call is skipped.
+        """
         if not self._xdotool or not self._last_window:
             return
         if self._last_window == self._own_id:
             return
+        if not force and not self.is_active():
+            return
         try:
-            subprocess.run(["xdotool", "windowactivate", "--sync", self._last_window],
+            subprocess.run(["xdotool", "windowactivate", self._last_window],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=1, check=False)
         except Exception:
             pass
 
     def _on_active_changed(self, *_args):
-        # If LOSK grabs focus, give it straight back.
-        if self.is_active() and self._last_window:
-            GLib.timeout_add(10, self._bounce_focus)
+        if self.is_active():
+            self._keep_above()
+            if self._last_window:
+                GLib.timeout_add(10, self._bounce_focus)
 
     def _bounce_focus(self):
-        self._return_focus()
+        self._return_focus(force=True)
         return False
 
     def _toggle_pin(self, button):
@@ -526,7 +551,9 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._clear_latched()
 
     def _cycle_modifier(self, name):
-        """Click once to latch for the next key, again to lock, again to clear."""
+        """Click once to latch for the next key, again to lock, again to clear.
+        Nothing is sent to the system here, so Shift alone cannot trigger a
+        desktop shortcut."""
         if name in self._latched:
             self._latched.discard(name)
             self._locked.add(name)

@@ -1,3 +1,13 @@
+losk (2.3.0) unstable; urgency=medium
+
+  * Faster typing: removed the blocking --sync on focus return.
+  * Focus is only handed back when LOSK actually holds it.
+  * Window sized like the Windows OSK, wide and short, with a real minimum.
+  * Always-on-top no longer re-asserted on a timer, which caused taskbar flashing.
+  * Vocabulary roughly doubled to 560 words and 199 word pairs.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Sun, 16 Aug 2026 23:30:00 +0000
+
 losk (2.2.0) unstable; urgency=medium
 
   * Fixed keys typing into LOSK instead of your app: focus is now returned before injection.

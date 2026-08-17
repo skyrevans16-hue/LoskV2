@@ -29,59 +29,85 @@ out if about who get which go me when make can like time no just him know take
 people into year your good some could them see other than then now look only
 come over think also back after use two how our work first well way even new
 want because any give day most us is are was were been being has had did does
-am i me myself yourself himself herself itself ourselves themselves
+am i me my mine myself yourself himself herself itself ourselves themselves
 hello hi hey help home however here please thanks thank sorry yes yeah no nope
-maybe okay ok sure right wrong true false correct
-name email password phone address city state country zip code
+maybe okay ok sure right wrong true false correct incorrect definitely probably
+name email password phone address city state country zip code username user
 computer keyboard mouse screen window file folder open close save print search
 internet browser google message text send receive delete edit copy paste undo
-download upload install update settings account login logout profile
+redo download upload install uninstall update upgrade settings account login
+logout signup profile dashboard menu button link click type press enter escape
 morning afternoon evening night today tomorrow yesterday week weekend month year
-monday tuesday wednesday thursday friday saturday sunday
+monday tuesday wednesday thursday friday saturday sunday daily weekly monthly
 january february march april may june july august september october november
-december
+december spring summer autumn winter season holiday vacation birthday
 love need feel understand remember forget hope wish try keep start stop finish
+begin continue change move stay leave return arrive wait watch listen speak
+talk tell ask answer read write learn teach study practice build create make
 water food coffee tea drink eat sleep walk run drive ride fly buy sell pay
+cook clean wash play sing dance travel visit meet call text email share
 family friend mother father brother sister child children son daughter wife
-husband parent baby people person man woman boy girl
+husband parent baby people person man woman boy girl teacher student boss
 school work job money life world place thing time home house room car street
-city town country road store shop office
-where why what when who how which whose
-something everything nothing anything someone everyone anyone nobody
-great really very much many little few lot more less best better worse
+city town country road store shop office building park garden kitchen bedroom
+where why what when who how which whose whom whether
+something everything nothing anything someone everyone anyone nobody somewhere
+anywhere everywhere nowhere sometime anytime
+great really very much many little few lot more less best better worse worst
+enough almost quite rather pretty fairly extremely totally completely
 always never often sometimes usually rarely again still yet already soon later
 before while during after until since between through around under over above
-below inside outside near far away back forward
-should must might could would will can may shall
-welcome goodbye bye see later thanks again
-question answer problem solution reason example idea plan project
-number letter word line page book paper list note
-big small large tiny long short high low fast slow easy hard simple
-new old young early late first last next previous other same different
-happy sad angry tired busy free ready sick fine well bad
+below inside outside near far away back forward together apart
+should must might could would will can may shall ought
+welcome goodbye bye later cheers regards sincerely
+question answer problem solution reason example idea plan project task goal
+result reason purpose meaning detail point part piece section
+number letter word line page book paper list note letter document report
+big small large tiny long short high low fast slow easy hard simple difficult
+new old young early late first last next previous other same different similar
+happy sad angry tired busy free ready sick fine well bad good nice lovely
+important interesting boring funny serious strange normal special common
+red blue green yellow black white orange purple brown grey pink
+one two three four five six seven eight nine ten hundred thousand million
+north south east west left right up down front behind side middle center
+please thank sorry excuse pardon congratulations
+game video music movie show song picture photo camera phone tablet laptop
+software program application system version update feature option setting
 """
 
 # Pairs that show up constantly in ordinary typing. Seeds the next-word model
 # so it is useful before you have typed anything.
 _PAIRS = """
-how are|how do|how much|how many|how is
-thank you|thanks for
-i am|i have|i will|i think|i need|i want|i can|i was|i would|i just
-you are|you can|you have|you should|you will
-what is|what do|what are|what time|what about
-can you|can i|can we
-do you|do i|do we|do not
-this is|this was|that is|that was
-there is|there are|there was
-it is|it was|it will
-we are|we can|we have|we will
-let me|let us
-going to|want to|need to|have to|used to|try to|able to
-a lot|a little|a few|a good
-in the|on the|at the|to the|for the|of the|with the|from the
-good morning|good night|good luck|good job
-see you|talk to|thanks again
-please let|please send|please check
+how are|how do|how much|how many|how is|how was|how about|how come
+thank you|thanks for|thanks again
+i am|i have|i will|i think|i need|i want|i can|i was|i would|i just|i know
+i love|i like|i see|i got|i did|i said|i feel|i hope|i guess|i should
+you are|you can|you have|you should|you will|you know|you want|you need
+what is|what do|what are|what time|what about|what happened|what kind
+can you|can i|can we|can it
+do you|do i|do we|do not|do that
+does it|does not|did you|did not|didn't know
+this is|this was|this will|that is|that was|that would|that will
+there is|there are|there was|there were
+it is|it was|it will|it would|it does|it looks|it seems
+we are|we can|we have|we will|we should|we need
+they are|they will|they have|they were
+let me|let us|let's go|let's do
+going to|want to|need to|have to|used to|try to|able to|about to|ready to
+a lot|a little|a few|a good|a new|a while|a bit
+in the|on the|at the|to the|for the|of the|with the|from the|by the
+in a|on a|at a|to a|for a|with a
+good morning|good night|good luck|good job|good idea|good point
+see you|talk to|talk about|think about|look at|look for|work on|based on
+please let|please send|please check|please make|please try
+thanks so|so much|so far|so that|so many
+would like|would be|could be|should be|will be|might be|must be
+one of|some of|most of|all of|part of|kind of|out of|instead of
+as well|as soon|as far|as long|right now|right away|just now
+make sure|make it|take care|take a|give me|give it
+the same|the other|the best|the first|the last|the next|the only
+is not|are not|was not|were not|has not|have not|will not|can not
+new york|last week|next week|this week|last year|next year|this year
 """
 
 
@@ -151,7 +177,7 @@ class SuggestionEngine:
     # ---------- learning ----------
 
     def learn(self, word):
-        """Called when a word is finished. Records the word and what preceded it."""
+        """Called when a word is finished. Records it and what preceded it."""
         clean = (word or "").strip().lower()
         if len(clean) < 2 or not clean.isalpha():
             self._previous = ""
@@ -191,7 +217,7 @@ class SuggestionEngine:
                     total += 60
                 scored.append((total, -len(word), word))
 
-        # Words you have used that are not in either list still deserve a slot.
+        # Words you have used that are in neither list still deserve a slot.
         for word in followers:
             if word not in seen and word.startswith(typed) and word != typed:
                 scored.append((followers[word] * 4, -len(word), word))
