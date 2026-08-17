@@ -1,3 +1,11 @@
+losk (2.6.0) unstable; urgency=medium
+
+  * Fixed keys not typing at all: the 2.5.0 click catcher was swallowing clicks.
+  * Typing runs off the reliable clicked signal; repeat can no longer break it.
+  * Diagnostics written to ~/.local/share/losk/losk.log so the apps menu works.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Mon, 17 Aug 2026 03:00:00 +0000
+
 losk (2.5.0) unstable; urgency=medium
 
   * Fixed keys repeating forever after a single click.
