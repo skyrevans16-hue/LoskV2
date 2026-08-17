@@ -1,3 +1,12 @@
+losk (2.5.0) unstable; urgency=medium
+
+  * Fixed keys repeating forever after a single click.
+  * Removed two wmctrl subprocess calls that ran on every key click.
+  * Added a Repeat toggle and a Fade transparency toggle.
+  * Startup diagnostics printed to the terminal.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Mon, 17 Aug 2026 02:00:00 +0000
+
 losk (2.4.0) unstable; urgency=medium
 
   * Hold a key to repeat it, including Backspace.

@@ -3,22 +3,28 @@ LOSK GTK 4 window.
 Made by ZeshMC
 
 Layout: the whole keyboard is one homogeneous Gtk.Grid, which is what makes
-keys grow and shrink with the window. One key unit = 4 grid columns, so a
-2.25 unit Shift is 9 columns.
+keys grow and shrink with the window. One key unit = 4 grid columns.
 
-Speed: the old build spawned xdotool on every keypress to hand focus back,
-costing 20 to 30 ms per key. Now LOSK asks the window manager never to give
-it keyboard focus in the first place (WM_HINTS input=False), so there is
-nothing to hand back and typing costs almost nothing. xdotool is only used
-as a fallback when python3-xlib is missing or the hint is refused.
+Speed rules learned the hard way:
+  * Never spawn a subprocess on a keypress. wmctrl and xdotool each cost
+    20-30 ms, and calling them per key made typing visibly laggy.
+  * _keep_above() runs at startup and on pin toggle only. It used to run on
+    every window activation, which meant twice per key click.
+  * Best case, LOSK asks the window manager never to give it keyboard focus
+    (WM_HINTS input=False), so no focus juggling is needed at all.
 
-Repeat: press and hold a key and it repeats, like a real keyboard.
+Repeat rules: GtkButton has its own internal click gesture that can swallow
+the release event, so the repeat gesture runs in CAPTURE phase, a window
+level catcher stops repeat on any release, and a watchdog kills a runaway
+repeat after a few seconds.
 """
 
 import glob
 import os
 import shutil
 import subprocess
+import sys
+import time
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -64,20 +70,19 @@ CLUSTER_GAP = 3
 NAV_START = MAIN_COLS + CLUSTER_GAP
 PAD_START = NAV_START + NAV_COLS + CLUSTER_GAP
 
-# Windows OSK proportions: wide and short. Chosen values, not measured.
 DEFAULT_W, DEFAULT_H = 1000, 330
 MIN_W, MIN_H = 780, 260
 SIZE_PRESETS = (("S", 800, 270), ("M", 1000, 330), ("L", 1320, 440))
 
-# Hold-to-repeat, matching typical desktop defaults.
-REPEAT_DELAY_MS = 400
-REPEAT_RATE_MS = 45
+REPEAT_DELAY_MS = 450
+REPEAT_RATE_MS = 55
+REPEAT_MAX_SECONDS = 6          # runaway guard
 
-# Keys that must never auto-repeat.
 NO_REPEAT = set(MODIFIERS) | {"KEY_CAPSLOCK", "KEY_NUMLOCK", "KEY_SCROLLLOCK"}
 
 BASE_WIDTH = 1000
 BASE_FONT = 13
+FADE_OPACITY = 0.75
 
 STATIC_CSS = b"""
 window { background-color: #1b202b; }
@@ -159,21 +164,25 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         self._repeat_source = None
         self._repeat_key = None
+        self._repeat_started = 0.0
+        self._repeat_enabled = True
 
         self._wmctrl = shutil.which("wmctrl")
         self._xdotool = shutil.which("xdotool")
+        self._session = os.environ.get("XDG_SESSION_TYPE", "unknown").lower()
         self._own_id = None
         self._last_window = None
         self._pinned = True
         self._never_focus = False
+        self._faded = False
 
         self._load_css()
         self._build()
+        self._install_safety_controllers()
 
         self.set_default_size(DEFAULT_W, DEFAULT_H)
         self.set_size_request(MIN_W, MIN_H)
         self.connect("notify::default-width", self._on_size_changed)
-        self.connect("notify::is-active", self._on_active_changed)
         self.connect("realize", self._on_realize)
         self.connect("close-request", self._on_close)
         self._apply_font(DEFAULT_W)
@@ -232,6 +241,21 @@ class LoskWindow(Gtk.ApplicationWindow):
         grid.set_vexpand(True)
         root.append(grid)
 
+    def _install_safety_controllers(self):
+        """Catch a pointer release anywhere in the window, and the pointer
+        leaving the window entirely. Either one must stop a running repeat."""
+        catcher = Gtk.GestureClick()
+        catcher.set_button(0)                      # any mouse button
+        catcher.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        catcher.connect("released", self._on_release_anywhere)
+        catcher.connect("cancel", self._on_release_anywhere)
+        self.add_controller(catcher)
+
+        motion = Gtk.EventControllerMotion()
+        motion.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        motion.connect("leave", self._on_release_anywhere)
+        self.add_controller(motion)
+
     def _no_focus(self, widget):
         widget.set_focus_on_click(False)
         widget.set_can_focus(False)
@@ -249,7 +273,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         return button
 
     def _build_toolbar(self):
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
         logo = find_logo()
         if logo:
@@ -276,6 +300,13 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.status.add_css_class("status")
         bar.append(self.status)
 
+        self.repeat_button = self._tool_button("Repeat", self._toggle_repeat)
+        self.repeat_button.add_css_class("tool-on")
+        bar.append(self.repeat_button)
+
+        self.fade_button = self._tool_button("Fade", self._toggle_fade)
+        bar.append(self.fade_button)
+
         self.mic_button = self._tool_button("Mic", self._toggle_voice)
         bar.append(self.mic_button)
 
@@ -293,9 +324,7 @@ class LoskWindow(Gtk.ApplicationWindow):
     def _status_text(self):
         if not self.kb.available:
             return "typing: off (%s)" % self.kb.reason
-        if self._never_focus:
-            return "typing: on \u00b7 fast"
-        return "typing: on"
+        return "typing: on \u00b7 fast" if self._never_focus else "typing: on \u00b7 compat"
 
     def _set_status(self, text):
         self.status.set_label(text)
@@ -358,8 +387,6 @@ class LoskWindow(Gtk.ApplicationWindow):
 
     def _make_key(self, label, name, shift_label=None):
         button = Gtk.Button()
-        # An ellipsizing label keeps long text from forcing the key wider,
-        # which is what would otherwise stop the window from shrinking.
         text = Gtk.Label(label=label)
         text.set_ellipsize(Pango.EllipsizeMode.END)
         text.set_single_line_mode(True)
@@ -380,11 +407,13 @@ class LoskWindow(Gtk.ApplicationWindow):
             button.add_css_class("key-mod")
             self._mod_buttons[name] = button
 
-        # Press and release instead of clicked, so a held key can repeat.
+        # CAPTURE phase so this sees press and release before GtkButton's own
+        # gesture can claim the sequence and swallow the release.
         gesture = Gtk.GestureClick()
+        gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         gesture.connect("pressed", self._on_key_pressed, name)
-        gesture.connect("released", self._on_key_released)
-        gesture.connect("cancel", self._on_key_cancel)
+        gesture.connect("released", self._on_release_anywhere)
+        gesture.connect("cancel", self._on_release_anywhere)
         button.add_controller(gesture)
         return button
 
@@ -396,11 +425,29 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._stop_repeat()
         self.minimize()
 
+    def _toggle_fade(self, button):
+        """Windows OSK can be made semi-transparent so you can read what is
+        underneath it."""
+        self._faded = not self._faded
+        self.set_opacity(FADE_OPACITY if self._faded else 1.0)
+        if self._faded:
+            button.add_css_class("tool-on")
+        else:
+            button.remove_css_class("tool-on")
+
+    def _toggle_repeat(self, button):
+        self._repeat_enabled = not self._repeat_enabled
+        self._stop_repeat()
+        if self._repeat_enabled:
+            button.add_css_class("tool-on")
+        else:
+            button.remove_css_class("tool-on")
+
     # ---------- window behaviour ----------
 
     def _on_realize(self, *_args):
         GLib.timeout_add(300, self._setup_window)
-        GLib.timeout_add(1000, self._track_other_window)
+        GLib.timeout_add(1500, self._track_other_window)
 
     def _own_xid(self):
         try:
@@ -417,25 +464,29 @@ class LoskWindow(Gtk.ApplicationWindow):
             self._own_id = str(xid)
             if self.xt and self.xt.available:
                 self._never_focus = self.xt.set_never_focus(xid)
-        elif self._xdotool:
-            try:
-                result = subprocess.run(
-                    ["xdotool", "search", "--name", "^LOSK$"],
-                    capture_output=True, text=True, timeout=2, check=False,
-                )
-                ids = result.stdout.split()
-                if ids:
-                    self._own_id = ids[-1]
-            except Exception:
-                pass
         self._keep_above()
         self._set_status(self._status_text())
+
+        # Printed so you can run losk in a terminal and paste this to me.
+        print(
+            "[LOSK] session=%s xid=%s xlib=%s (%s) never_focus=%s uinput=%s (%s)"
+            % (
+                self._session,
+                self._own_id,
+                bool(self.xt and self.xt.available),
+                self.xt.reason if self.xt else "module missing",
+                self._never_focus,
+                self.kb.available,
+                self.kb.reason,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         return False
 
     def _keep_above(self):
-        """Ask the window manager to keep LOSK above other windows. Called on
-        startup, on activation and on pin toggle, not on a timer, because every
-        call restacks the window and made the taskbar indicators flash."""
+        """Startup and pin toggle only. This used to run on every window
+        activation, which meant two subprocesses per key click."""
         if not self._pinned or not self._wmctrl:
             return False
         target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
@@ -449,9 +500,10 @@ class LoskWindow(Gtk.ApplicationWindow):
         return False
 
     def _track_other_window(self):
-        """Remember the app you were typing into, for the fallback path only."""
+        """Only needed on the compat path. If LOSK never takes focus there is
+        nothing to track."""
         if self._never_focus:
-            return True  # nothing to track, LOSK never steals focus
+            return True
         if self.is_active():
             return True
         if self.xt and self.xt.available:
@@ -474,7 +526,7 @@ class LoskWindow(Gtk.ApplicationWindow):
         return True
 
     def _return_focus(self):
-        """Only needed when the never-focus hint was refused."""
+        """No-op on the fast path. Never spawns a subprocess when xlib works."""
         if self._never_focus or not self._last_window:
             return
         if str(self._last_window) == str(self._own_id):
@@ -490,16 +542,6 @@ class LoskWindow(Gtk.ApplicationWindow):
                            timeout=1, check=False)
         except Exception:
             pass
-
-    def _on_active_changed(self, *_args):
-        if self.is_active():
-            self._keep_above()
-            if not self._never_focus and self._last_window:
-                GLib.timeout_add(10, self._bounce_focus)
-
-    def _bounce_focus(self):
-        self._return_focus()
-        return False
 
     def _toggle_pin(self, button):
         self._pinned = not self._pinned
@@ -565,15 +607,15 @@ class LoskWindow(Gtk.ApplicationWindow):
     # ---------- key repeat ----------
 
     def _on_key_pressed(self, _gesture, _n_press, _x, _y, name):
-        self._fire_key(name)
-        if name in NO_REPEAT:
-            return
         self._stop_repeat()
+        self._fire_key(name)
+        if not self._repeat_enabled or name in NO_REPEAT:
+            return
         self._repeat_key = name
+        self._repeat_started = time.monotonic()
         self._repeat_source = GLib.timeout_add(REPEAT_DELAY_MS, self._begin_repeat)
 
     def _begin_repeat(self):
-        """First delay has passed, now repeat quickly until release."""
         if self._repeat_key is None:
             return False
         self._repeat_source = GLib.timeout_add(REPEAT_RATE_MS, self._do_repeat)
@@ -582,13 +624,14 @@ class LoskWindow(Gtk.ApplicationWindow):
     def _do_repeat(self):
         if self._repeat_key is None:
             return False
+        # Runaway guard: if a release was somehow missed, stop anyway.
+        if time.monotonic() - self._repeat_started > REPEAT_MAX_SECONDS:
+            self._stop_repeat()
+            return False
         self._fire_key(self._repeat_key)
         return True
 
-    def _on_key_released(self, *_args):
-        self._stop_repeat()
-
-    def _on_key_cancel(self, *_args):
+    def _on_release_anywhere(self, *_args):
         self._stop_repeat()
 
     def _stop_repeat(self):
