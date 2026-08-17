@@ -1,3 +1,12 @@
+losk (2.4.0) unstable; urgency=medium
+
+  * Hold a key to repeat it, including Backspace.
+  * Big speed fix: LOSK now asks the window manager never to take keyboard focus, so no xdotool call is needed per keypress.
+  * Falls back to the old xdotool path if python3-xlib is unavailable.
+  * Vocabulary raised to 730 words and 208 word pairs, with bisect lookup.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Mon, 17 Aug 2026 01:00:00 +0000
+
 losk (2.3.0) unstable; urgency=medium
 
   * Faster typing: removed the blocking --sync on focus return.

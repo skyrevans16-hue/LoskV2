@@ -13,7 +13,8 @@ Depends: ${misc:Depends},
          gir1.2-gtk-4.0,
          python3-evdev,
          wmctrl,
-         xdotool
+         xdotool,
+         python3-xlib
 Description: LOSK - Linux On-Screen Keyboard
  A compact on-screen keyboard for Linux, laid out like a normal desktop
  keyboard rather than a tablet keyboard. Includes function keys, a full

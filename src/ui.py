@@ -2,16 +2,17 @@
 LOSK GTK 4 window.
 Made by ZeshMC
 
-The whole keyboard is one homogeneous Gtk.Grid. That is what makes the keys
-grow and shrink when you resize the window, instead of staying a fixed size.
-One key unit = 4 grid columns, so a 2.25 unit Shift is 9 columns.
+Layout: the whole keyboard is one homogeneous Gtk.Grid, which is what makes
+keys grow and shrink with the window. One key unit = 4 grid columns, so a
+2.25 unit Shift is 9 columns.
 
-Focus rule: clicking LOSK gives LOSK the keyboard focus, so focus must be
-handed back to your real app BEFORE a key is injected. Injecting first sends
-the keystroke into LOSK itself.
+Speed: the old build spawned xdotool on every keypress to hand focus back,
+costing 20 to 30 ms per key. Now LOSK asks the window manager never to give
+it keyboard focus in the first place (WM_HINTS input=False), so there is
+nothing to hand back and typing costs almost nothing. xdotool is only used
+as a fallback when python3-xlib is missing or the hint is refused.
 
-Speed rule: xdotool costs milliseconds per call, so only call it when LOSK
-actually holds focus. Once focus has bounced back, later keys skip it.
+Repeat: press and hold a key and it repeats, like a real keyboard.
 """
 
 import glob
@@ -22,6 +23,12 @@ import subprocess
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, Gdk, GLib, Pango
+
+try:
+    gi.require_version("GdkX11", "4.0")
+    from gi.repository import GdkX11
+except Exception:
+    GdkX11 = None
 
 from layouts import (
     FUNCTION_ROW,
@@ -38,13 +45,18 @@ from keyboard import VirtualKeyboard
 from suggestions import SuggestionEngine
 
 try:
+    from xtools import XTools
+except Exception:
+    XTools = None
+
+try:
     from voice import VoiceInput
 except Exception:
     VoiceInput = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CPU = 4                              # grid columns per key unit
+CPU = 4
 MAIN_COLS = 15 * CPU
 NAV_COLS = 3 * CPU
 PAD_COLS = 4 * CPU
@@ -52,11 +64,17 @@ CLUSTER_GAP = 3
 NAV_START = MAIN_COLS + CLUSTER_GAP
 PAD_START = NAV_START + NAV_COLS + CLUSTER_GAP
 
-# Windows OSK proportions: wide and short, not a tall tablet keyboard.
-# These are chosen values, not measured from a real Windows screenshot.
+# Windows OSK proportions: wide and short. Chosen values, not measured.
 DEFAULT_W, DEFAULT_H = 1000, 330
 MIN_W, MIN_H = 780, 260
 SIZE_PRESETS = (("S", 800, 270), ("M", 1000, 330), ("L", 1320, 440))
+
+# Hold-to-repeat, matching typical desktop defaults.
+REPEAT_DELAY_MS = 400
+REPEAT_RATE_MS = 45
+
+# Keys that must never auto-repeat.
+NO_REPEAT = set(MODIFIERS) | {"KEY_CAPSLOCK", "KEY_NUMLOCK", "KEY_SCROLLLOCK"}
 
 BASE_WIDTH = 1000
 BASE_FONT = 13
@@ -126,6 +144,7 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         self.kb = VirtualKeyboard()
         self.words = SuggestionEngine()
+        self.xt = XTools() if XTools else None
         self.voice = VoiceInput() if VoiceInput else None
 
         self._keys = []
@@ -138,12 +157,15 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._suggestions = []
         self._font_size = 0
 
+        self._repeat_source = None
+        self._repeat_key = None
+
         self._wmctrl = shutil.which("wmctrl")
         self._xdotool = shutil.which("xdotool")
-        self._session = os.environ.get("XDG_SESSION_TYPE", "unknown").lower()
         self._own_id = None
         self._last_window = None
         self._pinned = True
+        self._never_focus = False
 
         self._load_css()
         self._build()
@@ -211,8 +233,6 @@ class LoskWindow(Gtk.ApplicationWindow):
         root.append(grid)
 
     def _no_focus(self, widget):
-        """Nothing in LOSK may take keyboard focus. If it can, an injected key
-        activates it instead of reaching your app."""
         widget.set_focus_on_click(False)
         widget.set_can_focus(False)
         try:
@@ -271,9 +291,11 @@ class LoskWindow(Gtk.ApplicationWindow):
         return bar
 
     def _status_text(self):
-        if self.kb.available:
-            return "typing: on"
-        return "typing: off (%s)" % self.kb.reason
+        if not self.kb.available:
+            return "typing: off (%s)" % self.kb.reason
+        if self._never_focus:
+            return "typing: on \u00b7 fast"
+        return "typing: on"
 
     def _set_status(self, text):
         self.status.set_label(text)
@@ -358,7 +380,12 @@ class LoskWindow(Gtk.ApplicationWindow):
             button.add_css_class("key-mod")
             self._mod_buttons[name] = button
 
-        button.connect("clicked", self._on_key, name, label, shift_label)
+        # Press and release instead of clicked, so a held key can repeat.
+        gesture = Gtk.GestureClick()
+        gesture.connect("pressed", self._on_key_pressed, name)
+        gesture.connect("released", self._on_key_released)
+        gesture.connect("cancel", self._on_key_cancel)
+        button.add_controller(gesture)
         return button
 
     def _set_size(self, _button, width, height):
@@ -366,46 +393,52 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._apply_font(width)
 
     def _on_hide(self, _button):
+        self._stop_repeat()
         self.minimize()
 
     # ---------- window behaviour ----------
 
     def _on_realize(self, *_args):
-        GLib.timeout_add(500, self._find_own_id)
+        GLib.timeout_add(300, self._setup_window)
         GLib.timeout_add(1000, self._track_other_window)
 
-    def _find_own_id(self):
-        if not self._xdotool:
-            return False
+    def _own_xid(self):
         try:
-            result = subprocess.run(
-                ["xdotool", "search", "--name", "^LOSK$"],
-                capture_output=True, text=True, timeout=2, check=False,
-            )
-            ids = result.stdout.split()
-            if ids:
-                self._own_id = ids[-1]
-                # Never let LOSK become its own focus target.
-                if self._last_window in ids:
-                    self._last_window = None
-                self._keep_above()
-                return False
+            surface = self.get_surface()
+            if GdkX11 and isinstance(surface, GdkX11.X11Surface):
+                return surface.get_xid()
         except Exception:
             pass
-        return True
+        return None
+
+    def _setup_window(self):
+        xid = self._own_xid()
+        if xid:
+            self._own_id = str(xid)
+            if self.xt and self.xt.available:
+                self._never_focus = self.xt.set_never_focus(xid)
+        elif self._xdotool:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--name", "^LOSK$"],
+                    capture_output=True, text=True, timeout=2, check=False,
+                )
+                ids = result.stdout.split()
+                if ids:
+                    self._own_id = ids[-1]
+            except Exception:
+                pass
+        self._keep_above()
+        self._set_status(self._status_text())
+        return False
 
     def _keep_above(self):
-        """Ask the window manager to keep LOSK above other windows.
-
-        Called on startup, when LOSK is activated, and when you toggle the pin.
-        It used to run on a 2 second timer, but every call restacks the window
-        and that made the taskbar indicators flash.
-        """
+        """Ask the window manager to keep LOSK above other windows. Called on
+        startup, on activation and on pin toggle, not on a timer, because every
+        call restacks the window and made the taskbar indicators flash."""
         if not self._pinned or not self._wmctrl:
             return False
         target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
-        # skip_taskbar is deliberately not set. It made a minimized LOSK
-        # impossible to get back.
         for flag in ("add,above", "add,sticky"):
             try:
                 subprocess.run(["wmctrl"] + target + ["-b", flag],
@@ -416,12 +449,18 @@ class LoskWindow(Gtk.ApplicationWindow):
         return False
 
     def _track_other_window(self):
-        """Remember the app you were typing into. Skipped while LOSK is active,
-        since the answer would just be LOSK."""
-        if not self._xdotool:
-            return False
+        """Remember the app you were typing into, for the fallback path only."""
+        if self._never_focus:
+            return True  # nothing to track, LOSK never steals focus
         if self.is_active():
             return True
+        if self.xt and self.xt.available:
+            window_id = self.xt.active_window()
+            if window_id and str(window_id) != str(self._own_id):
+                self._last_window = window_id
+            return True
+        if not self._xdotool:
+            return False
         try:
             result = subprocess.run(
                 ["xdotool", "getactivewindow"],
@@ -434,21 +473,19 @@ class LoskWindow(Gtk.ApplicationWindow):
             pass
         return True
 
-    def _return_focus(self, force=False):
-        """Hand focus back to your app. Must run BEFORE injecting a key.
-
-        No --sync here: waiting for the window switch made every keypress
-        visibly slow. And if LOSK does not currently hold focus there is
-        nothing to hand back, so the whole call is skipped.
-        """
-        if not self._xdotool or not self._last_window:
+    def _return_focus(self):
+        """Only needed when the never-focus hint was refused."""
+        if self._never_focus or not self._last_window:
             return
-        if self._last_window == self._own_id:
+        if str(self._last_window) == str(self._own_id):
             return
-        if not force and not self.is_active():
+        if self.xt and self.xt.available:
+            self.xt.activate(int(self._last_window))
+            return
+        if not self._xdotool:
             return
         try:
-            subprocess.run(["xdotool", "windowactivate", self._last_window],
+            subprocess.run(["xdotool", "windowactivate", str(self._last_window)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=1, check=False)
         except Exception:
@@ -457,11 +494,11 @@ class LoskWindow(Gtk.ApplicationWindow):
     def _on_active_changed(self, *_args):
         if self.is_active():
             self._keep_above()
-            if self._last_window:
+            if not self._never_focus and self._last_window:
                 GLib.timeout_add(10, self._bounce_focus)
 
     def _bounce_focus(self):
-        self._return_focus(force=True)
+        self._return_focus()
         return False
 
     def _toggle_pin(self, button):
@@ -483,8 +520,11 @@ class LoskWindow(Gtk.ApplicationWindow):
                     pass
 
     def _on_close(self, *_args):
+        self._stop_repeat()
         if self.voice:
             self.voice.stop()
+        if self.xt:
+            self.xt.close()
         self.kb.close()
         return False
 
@@ -507,7 +547,6 @@ class LoskWindow(Gtk.ApplicationWindow):
             self._set_status("voice: listening")
 
     def _on_transcript(self, text):
-        # Called from the audio thread, so hop back to the GTK thread.
         GLib.idle_add(self._type_transcript, text)
 
     def _type_transcript(self, text):
@@ -523,6 +562,44 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._refresh_suggestions()
         return False
 
+    # ---------- key repeat ----------
+
+    def _on_key_pressed(self, _gesture, _n_press, _x, _y, name):
+        self._fire_key(name)
+        if name in NO_REPEAT:
+            return
+        self._stop_repeat()
+        self._repeat_key = name
+        self._repeat_source = GLib.timeout_add(REPEAT_DELAY_MS, self._begin_repeat)
+
+    def _begin_repeat(self):
+        """First delay has passed, now repeat quickly until release."""
+        if self._repeat_key is None:
+            return False
+        self._repeat_source = GLib.timeout_add(REPEAT_RATE_MS, self._do_repeat)
+        return False
+
+    def _do_repeat(self):
+        if self._repeat_key is None:
+            return False
+        self._fire_key(self._repeat_key)
+        return True
+
+    def _on_key_released(self, *_args):
+        self._stop_repeat()
+
+    def _on_key_cancel(self, *_args):
+        self._stop_repeat()
+
+    def _stop_repeat(self):
+        if self._repeat_source is not None:
+            try:
+                GLib.source_remove(self._repeat_source)
+            except Exception:
+                pass
+        self._repeat_source = None
+        self._repeat_key = None
+
     # ---------- typing ----------
 
     def _shift_on(self):
@@ -531,7 +608,7 @@ class LoskWindow(Gtk.ApplicationWindow):
     def _active_mods(self):
         return sorted(self._latched | self._locked)
 
-    def _on_key(self, _button, name, label, shift_label):
+    def _fire_key(self, name):
         if name in MODIFIERS:
             self._cycle_modifier(name)
             return
@@ -544,7 +621,6 @@ class LoskWindow(Gtk.ApplicationWindow):
             self._refresh_labels()
             return
 
-        # Focus first, then inject. The other order sends the key into LOSK.
         self._return_focus()
         self.kb.tap(name, self._active_mods())
         self._update_word(name)
