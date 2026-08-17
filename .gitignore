@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.deb
+*.buildinfo
+*.changes
+
+debian/.debhelper/
+debian/losk/
+debian/files
+debian/debhelper-build-stamp
+debian/*.substvars
