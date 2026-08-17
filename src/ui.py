@@ -1,6 +1,10 @@
 """
 LOSK GTK 4 window.
 Made by ZeshMC
+
+The whole keyboard is one homogeneous Gtk.Grid. That is what makes the keys
+grow and shrink when you resize the window, instead of staying a fixed size.
+One key unit = 4 grid columns, so a 2.25 unit Shift is 9 columns.
 """
 
 import glob
@@ -10,7 +14,7 @@ import subprocess
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk, GLib
+from gi.repository import Gtk, Gdk, GLib, Pango
 
 from layouts import (
     FUNCTION_ROW,
@@ -28,13 +32,18 @@ from suggestions import SuggestionEngine
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# One "unit" is the width of a normal letter key. Everything scales from this,
-# which is what keeps the whole board compact instead of tablet sized.
-NORMAL_UNIT = 38
-BIG_UNIT = 50
-GAP = 3
+CPU = 4                              # grid columns per key unit
+MAIN_COLS = 15 * CPU                 # main block is 15 units wide
+NAV_COLS = 3 * CPU
+PAD_COLS = 4 * CPU
+CLUSTER_GAP = 3                      # blank columns between clusters
+NAV_START = MAIN_COLS + CLUSTER_GAP
+PAD_START = NAV_START + NAV_COLS + CLUSTER_GAP
 
-CSS = b"""
+BASE_WIDTH = 1000                    # reference width for font scaling
+BASE_FONT = 13
+
+STATIC_CSS = b"""
 window { background-color: #1b202b; }
 .toolbar-title { font-size: 15px; font-weight: bold; color: #eef2f8; }
 .toolbar-sub { font-size: 10px; color: #8d9ab2; }
@@ -49,12 +58,10 @@ window { background-color: #1b202b; }
     margin: 0;
     min-width: 0;
     min-height: 0;
-    font-size: 13px;
     box-shadow: none;
 }
 .key:hover { background-color: #384254; }
 .key:active { background-color: #4d81d8; }
-.key-big { font-size: 16px; }
 .key-mod { background-color: #333c4e; }
 .key-latched { background-color: #4d81d8; border-color: #6d9bea; }
 .key-locked { background-color: #c9762f; border-color: #e0913f; }
@@ -64,7 +71,6 @@ window { background-color: #1b202b; }
     color: #cfe0ff;
     border: 1px solid #384254;
     border-radius: 5px;
-    font-size: 12px;
     padding: 2px 6px;
     box-shadow: none;
 }
@@ -86,15 +92,12 @@ window { background-color: #1b202b; }
 
 
 def find_logo():
-    """Packaged icon first, then whatever PNG is sitting in assets/icons."""
     packaged = "/usr/share/icons/hicolor/512x512/apps/losk.png"
     if os.path.exists(packaged):
         return packaged
     local_dir = os.path.join(BASE_DIR, "..", "assets", "icons")
     matches = sorted(glob.glob(os.path.join(local_dir, "*.png")))
-    if matches:
-        return matches[0]
-    return None
+    return matches[0] if matches else None
 
 
 class LoskWindow(Gtk.ApplicationWindow):
@@ -105,45 +108,70 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.kb = VirtualKeyboard()
         self.words = SuggestionEngine()
 
-        self.unit = NORMAL_UNIT
-        self.big = False
-
-        self._sized = []          # (widget, width_units, height_units)
-        self._keys = []           # every key button, for the big/normal font swap
-        self._labels = []         # (button, normal_label, shift_label, is_letter)
+        self._keys = []
+        self._labels = []
         self._mod_buttons = {}
         self._latched = set()
         self._locked = set()
         self._caps = False
         self._word = ""
         self._suggestions = []
+        self._font_size = 0
 
-        self._xdotool = shutil.which("xdotool")
         self._wmctrl = shutil.which("wmctrl")
+        self._xdotool = shutil.which("xdotool")
+        self._session = os.environ.get("XDG_SESSION_TYPE", "unknown").lower()
+        self._own_id = None
         self._last_window = None
-        self._session = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        self._pinned = True
 
         self._load_css()
         self._build()
 
-        self.set_default_size(-1, -1)
+        self.set_default_size(1000, 420)
+        self.connect("notify::default-width", self._on_size_changed)
         self.connect("realize", self._on_realize)
-        self.connect("notify::is-active", self._on_active_changed)
         self.connect("close-request", self._on_close)
+        self._apply_font(1000)
 
-    # ---------- setup ----------
+    # ---------- styling ----------
 
     def _load_css(self):
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
         display = Gdk.Display.get_default()
-        if display is not None:
-            Gtk.StyleContext.add_provider_for_display(
-                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
+        if display is None:
+            return
+        static = Gtk.CssProvider()
+        static.load_from_data(STATIC_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            display, static, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+        self._font_provider = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(
+            display, self._font_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1
+        )
 
-    def _px(self, units):
-        return int(round(units * self.unit + (units - 1) * GAP))
+    def _on_size_changed(self, *_args):
+        self._apply_font(self.get_width() or self.get_default_size()[0])
+
+    def _apply_font(self, width):
+        """Grow the label text along with the window so keys stay readable."""
+        if not width:
+            return
+        scale = max(0.65, min(2.4, float(width) / BASE_WIDTH))
+        size = int(round(BASE_FONT * scale))
+        if size == self._font_size:
+            return
+        self._font_size = size
+        css = ".key label { font-size: %dpx; } .suggest { font-size: %dpx; }" % (
+            size,
+            max(10, size - 1),
+        )
+        try:
+            self._font_provider.load_from_data(css.encode())
+        except Exception:
+            pass
+
+    # ---------- building ----------
 
     def _build(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -155,7 +183,11 @@ class LoskWindow(Gtk.ApplicationWindow):
 
         root.append(self._build_toolbar())
         root.append(self._build_suggestion_bar())
-        root.append(self._build_keyboard())
+
+        grid = self._build_grid()
+        grid.set_hexpand(True)
+        grid.set_vexpand(True)
+        root.append(grid)
 
     def _build_toolbar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -185,24 +217,28 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.status.add_css_class("status")
         bar.append(self.status)
 
-        self.top_button = Gtk.Button(label="Stay On Top")
-        self.top_button.add_css_class("tool")
-        self.top_button.set_focus_on_click(False)
-        self.top_button.connect("clicked", lambda _b: self._apply_always_on_top())
-        bar.append(self.top_button)
+        self.pin_button = Gtk.Button(label="Pinned")
+        self.pin_button.add_css_class("tool")
+        self.pin_button.add_css_class("tool-on")
+        self.pin_button.set_focus_on_click(False)
+        self.pin_button.connect("clicked", self._toggle_pin)
+        bar.append(self.pin_button)
 
-        self.size_button = Gtk.Button(label="Make Big")
-        self.size_button.add_css_class("tool")
-        self.size_button.set_focus_on_click(False)
-        self.size_button.connect("clicked", self._toggle_big)
-        bar.append(self.size_button)
+        for label, width, height in (("S", 780, 340), ("M", 1000, 420), ("L", 1320, 560)):
+            button = Gtk.Button(label=label)
+            button.add_css_class("tool")
+            button.set_focus_on_click(False)
+            button.connect("clicked", self._set_size, width, height)
+            bar.append(button)
 
         return bar
 
     def _status_text(self):
-        if self.kb.available:
-            return "typing: on"
-        return "typing: off (%s)" % self.kb.reason
+        parts = []
+        parts.append("typing: on" if self.kb.available else "typing: off (%s)" % self.kb.reason)
+        if self._session == "wayland":
+            parts.append("wayland")
+        return "  \u00b7  ".join(parts)
 
     def _build_suggestion_bar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -219,171 +255,174 @@ class LoskWindow(Gtk.ApplicationWindow):
         self._refresh_suggestions()
         return bar
 
-    def _build_keyboard(self):
-        board = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=GAP * 5)
-        board.set_halign(Gtk.Align.CENTER)
+    def _build_grid(self):
+        grid = Gtk.Grid(column_spacing=3, row_spacing=3)
+        grid.set_column_homogeneous(True)
+        grid.set_row_homogeneous(True)
 
-        # Main block
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=GAP)
-        main.append(self._build_row(FUNCTION_ROW))
-        gap_row = Gtk.Box()
-        gap_row.set_size_request(-1, 6)
-        main.append(gap_row)
-        for row in ROWS:
-            main.append(self._build_row(row))
-        board.append(main)
+        # Row 0: function row
+        col = 0
+        for label, name, width, shift_label in FUNCTION_ROW:
+            span = int(round(width * CPU))
+            if name:
+                grid.attach(self._make_key(label, name, shift_label), col, 0, span, 1)
+            col += span
 
-        # Navigation and arrows share one column so the rows line up
-        nav = Gtk.Grid(row_spacing=GAP, column_spacing=GAP)
-        for label, name, col, row in NAV_GRID:
-            nav.attach(self._make_key(label, name, 1.0, 1.0), col, row, 1, 1)
-        blank = Gtk.Box()
-        self._track_size(blank, 1.0, 1.0)
-        nav.attach(blank, 0, 3, 3, 1)
-        for label, name, col, row in ARROW_GRID:
-            nav.attach(self._make_key(label, name, 1.0, 1.0), col, row, 1, 1)
-        board.append(nav)
+        # Rows 1 to 5: main block
+        for row_index, row in enumerate(ROWS):
+            col = 0
+            for label, name, width, shift_label in row:
+                span = int(round(width * CPU))
+                if name:
+                    key = self._make_key(label, name, shift_label)
+                    if row_index == 0:
+                        key.set_margin_top(6)
+                    grid.attach(key, col, row_index + 1, span, 1)
+                col += span
 
-        # Numpad, offset down one row so it starts under the function row
-        pad = Gtk.Grid(row_spacing=GAP, column_spacing=GAP)
-        pad_top = Gtk.Box()
-        self._track_size(pad_top, 1.0, 1.0)
-        pad.attach(pad_top, 0, 0, 4, 1)
-        for label, name, col, row, colspan, rowspan in NUMPAD_GRID:
-            key = self._make_key(label, name, float(colspan), float(rowspan))
-            pad.attach(key, col, row + 1, colspan, rowspan)
-        board.append(pad)
+        # Navigation cluster, rows line up with the main block
+        for label, name, col_unit, row in NAV_GRID:
+            key = self._make_key(label, name, None)
+            if row == 1:
+                key.set_margin_top(6)
+            grid.attach(key, NAV_START + col_unit * CPU, row, CPU, 1)
 
-        return board
+        for label, name, col_unit, row in ARROW_GRID:
+            grid.attach(self._make_key(label, name, None),
+                        NAV_START + col_unit * CPU, row, CPU, 1)
 
-    def _build_row(self, row):
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=GAP)
-        for label, name, width, shift_label in row:
-            if name is None:
-                spacer = Gtk.Box()
-                self._track_size(spacer, width, 1.0)
-                box.append(spacer)
-            else:
-                box.append(self._make_key(label, name, width, 1.0, shift_label))
-        return box
+        # Numpad, shifted down one row so it starts under the function row
+        for label, name, col_unit, row, colspan, rowspan in NUMPAD_GRID:
+            key = self._make_key(label, name, None)
+            if row == 0:
+                key.set_margin_top(6)
+            grid.attach(key, PAD_START + col_unit * CPU, row + 1,
+                        colspan * CPU, rowspan)
 
-    def _track_size(self, widget, width_units, height_units):
-        self._sized.append((widget, width_units, height_units))
-        widget.set_size_request(self._px(width_units), self._px(height_units))
+        return grid
 
-    def _make_key(self, label, name, width, height, shift_label=None):
-        button = Gtk.Button(label=label)
+    def _make_key(self, label, name, shift_label=None):
+        button = Gtk.Button()
+        # A separate ellipsizing label keeps long text from forcing the key wider,
+        # which is what would otherwise stop the window from shrinking.
+        text = Gtk.Label(label=label)
+        text.set_ellipsize(Pango.EllipsizeMode.END)
+        text.set_single_line_mode(True)
+        button.set_child(text)
+
         button.add_css_class("key")
         button.set_focus_on_click(False)
         button.set_can_focus(False)
-        self._track_size(button, width, height)
+        button.set_hexpand(True)
+        button.set_vexpand(True)
+        button.set_size_request(18, 20)
         self._keys.append(button)
 
         is_letter = name in LETTER_KEYS
         if shift_label or is_letter:
-            self._labels.append((button, label, shift_label, is_letter))
+            self._labels.append((text, label, shift_label, is_letter))
 
-        if name in MODIFIERS:
-            button.add_css_class("key-mod")
-            self._mod_buttons[name] = button
-        if name == "KEY_CAPSLOCK":
+        if name in MODIFIERS or name == "KEY_CAPSLOCK":
             button.add_css_class("key-mod")
             self._mod_buttons[name] = button
 
         button.connect("clicked", self._on_key, name, label, shift_label)
         return button
 
+    def _set_size(self, _button, width, height):
+        self.set_default_size(width, height)
+        self._apply_font(width)
+
     # ---------- window behaviour ----------
 
     def _on_realize(self, *_args):
-        GLib.timeout_add(400, self._apply_always_on_top)
-        if self._xdotool:
-            GLib.timeout_add(600, self._remember_window)
+        GLib.timeout_add(500, self._find_own_id)
+        GLib.timeout_add(700, self._track_other_window)
+        GLib.timeout_add(2000, self._keep_above)
 
-    def _apply_always_on_top(self):
-        """Ask the window manager to keep LOSK above other windows."""
-        if not self._wmctrl:
-            self.top_button.set_label("wmctrl missing")
+    def _find_own_id(self):
+        if not self._xdotool:
             return False
-        for flag in ("add,above", "add,sticky", "add,skip_taskbar"):
+        try:
+            result = subprocess.run(
+                ["xdotool", "search", "--name", "^LOSK$"],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
+            ids = result.stdout.split()
+            if ids:
+                self._own_id = ids[-1]
+                self._keep_above()
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _keep_above(self):
+        """Re-assert always-on-top. Some window managers drop the hint, so we repeat."""
+        if not self._pinned or not self._wmctrl:
+            return True
+        target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
+        for flag in ("add,above", "add,sticky", "add,skip_taskbar", "add,skip_pager"):
             try:
-                subprocess.run(
-                    ["wmctrl", "-r", "LOSK", "-b", flag],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=2,
-                )
+                subprocess.run(["wmctrl"] + target + ["-b", flag],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=2, check=False)
             except Exception:
                 pass
-        self.top_button.add_css_class("tool-on")
-        return False
+        return True
 
-    def _remember_window(self):
-        """Keep track of the last app you were actually typing into."""
+    def _track_other_window(self):
+        """Remember the app you were typing into so keystrokes can go back to it."""
+        if not self._xdotool:
+            return False
         try:
             result = subprocess.run(
                 ["xdotool", "getactivewindow"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-                check=False,
+                capture_output=True, text=True, timeout=1, check=False,
             )
             window_id = result.stdout.strip()
-            if window_id and not self.is_active():
+            if window_id and window_id != self._own_id:
                 self._last_window = window_id
         except Exception:
             pass
         return True
 
-    def _on_active_changed(self, *_args):
-        # If LOSK grabs focus, hand it straight back so your keystrokes land
-        # in the app you were using instead of in LOSK.
-        if self.is_active() and self._last_window:
-            GLib.timeout_add(20, self._restore_focus)
-
-    def _restore_focus(self):
+    def _return_focus(self):
         if not self._xdotool or not self._last_window:
-            return False
+            return
         try:
-            subprocess.run(
-                ["xdotool", "windowactivate", self._last_window],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1,
-                check=False,
-            )
+            subprocess.run(["xdotool", "windowactivate", self._last_window],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=1, check=False)
         except Exception:
             pass
-        return False
+
+    def _toggle_pin(self, button):
+        self._pinned = not self._pinned
+        if self._pinned:
+            button.set_label("Pinned")
+            button.add_css_class("tool-on")
+            self._keep_above()
+        else:
+            button.set_label("Unpinned")
+            button.remove_css_class("tool-on")
+            if self._wmctrl:
+                target = ["-i", "-r", self._own_id] if self._own_id else ["-r", "LOSK"]
+                try:
+                    subprocess.run(["wmctrl"] + target + ["-b", "remove,above"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=2, check=False)
+                except Exception:
+                    pass
 
     def _on_close(self, *_args):
         self.kb.close()
         return False
 
-    # ---------- sizing ----------
-
-    def _toggle_big(self, button):
-        self.big = not self.big
-        self.unit = BIG_UNIT if self.big else NORMAL_UNIT
-        for widget, width_units, height_units in self._sized:
-            widget.set_size_request(self._px(width_units), self._px(height_units))
-        for key in self._keys:
-            if self.big:
-                key.add_css_class("key-big")
-            else:
-                key.remove_css_class("key-big")
-        button.set_label("Normal Size" if self.big else "Make Big")
-        GLib.idle_add(self._shrink_to_fit)
-
-    def _shrink_to_fit(self):
-        self.set_default_size(1, 1)
-        return False
-
     # ---------- typing ----------
 
     def _shift_on(self):
-        return bool(self._latched & set(SHIFT_KEYS) or self._locked & set(SHIFT_KEYS))
+        return bool((self._latched | self._locked) & set(SHIFT_KEYS))
 
     def _active_mods(self):
         return sorted(self._latched | self._locked)
@@ -401,11 +440,12 @@ class LoskWindow(Gtk.ApplicationWindow):
             return
 
         self.kb.tap(name, self._active_mods())
-        self._update_word(name, label, shift_label)
+        self._update_word(name)
         self._clear_latched()
+        self._return_focus()
 
     def _cycle_modifier(self, name):
-        """Click once to latch for the next key, click again to lock, again to clear."""
+        """Click once to latch for the next key, again to lock, again to clear."""
         if name in self._latched:
             self._latched.discard(name)
             self._locked.add(name)
@@ -429,22 +469,21 @@ class LoskWindow(Gtk.ApplicationWindow):
             if name == "KEY_CAPSLOCK":
                 if self._caps:
                     button.add_css_class("key-locked")
-                continue
-            if name in self._locked:
+            elif name in self._locked:
                 button.add_css_class("key-locked")
             elif name in self._latched:
                 button.add_css_class("key-latched")
 
     def _refresh_labels(self):
         shift = self._shift_on()
-        for button, normal, shifted, is_letter in self._labels:
+        for text, normal, shifted, is_letter in self._labels:
             if is_letter:
                 upper = shift != self._caps
-                button.set_label(normal.upper() if upper else normal)
+                text.set_label(normal.upper() if upper else normal)
             elif shifted:
-                button.set_label(shifted if shift else normal)
+                text.set_label(shifted if shift else normal)
 
-    def _update_word(self, name, label, shift_label):
+    def _update_word(self, name):
         if name in ("KEY_SPACE", "KEY_ENTER", "KEY_TAB", "KEY_KPENTER"):
             self.words.learn(self._word)
             self._word = ""
@@ -484,11 +523,11 @@ class LoskWindow(Gtk.ApplicationWindow):
         self.words.learn(word)
         self._word = ""
         self._refresh_suggestions()
+        self._return_focus()
 
     def _type_char(self, char):
         entry = CHAR_TO_KEY.get(char)
         if entry is None:
             return
         name, needs_shift = entry
-        mods = ["KEY_LEFTSHIFT"] if needs_shift else []
-        self.kb.tap(name, mods)
+        self.kb.tap(name, ["KEY_LEFTSHIFT"] if needs_shift else [])

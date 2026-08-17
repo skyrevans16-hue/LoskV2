@@ -1,3 +1,12 @@
+losk (2.1.0) unstable; urgency=medium
+
+  * Keys scale with the window using a homogeneous grid.
+  * S/M/L size buttons with matching font scaling.
+  * Always-on-top re-asserted every 2 seconds, plus a Pinned toggle.
+  * Focus returns to the previous app after each keypress.
+
+ -- ZeshMC <zeshmc@users.noreply.github.com>  Sun, 16 Aug 2026 20:00:00 +0000
+
 losk (2.0.0) unstable; urgency=medium
 
   * LoskV2 rewrite by ZeshMC.

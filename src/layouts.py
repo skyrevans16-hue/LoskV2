@@ -9,7 +9,7 @@ Width is in "units" where 1.0 = one normal letter key, like a real keyboard.
 
 FUNCTION_ROW = [
     ("Esc", "KEY_ESC", 1.0, None),
-    (None, None, 0.6, None),
+    (None, None, 1.0, None),
     ("F1", "KEY_F1", 1.0, None),
     ("F2", "KEY_F2", 1.0, None),
     ("F3", "KEY_F3", 1.0, None),
